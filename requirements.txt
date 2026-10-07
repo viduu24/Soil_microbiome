@@ -1,0 +1,10 @@
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+pyarrow>=14.0
+streamlit>=1.30
+plotly>=5.18,<6
+kaleido==0.2.1
+Pillow>=10.0
+networkx>=3.2

@@ -1,0 +1,38 @@
+sample.id,Season,Stage,ADH,reason,nearest_available_adh,adh_gap
+C22-7S,Summer,Advanced,1554.0,ADH gap too large (tolerance=5.0),1827.0,273.0
+C22-7U,Summer,Advanced,1554.0,ADH gap too large (tolerance=5.0),1827.0,273.0
+C23-7S,Summer,Advanced,1554.0,ADH gap too large (tolerance=5.0),1827.0,273.0
+C23-7U,Summer,Advanced,1554.0,ADH gap too large (tolerance=5.0),1827.0,273.0
+C24-7S,Summer,Advanced,1554.0,ADH gap too large (tolerance=5.0),1827.0,273.0
+C24-7U,Summer,Advanced,1554.0,ADH gap too large (tolerance=5.0),1827.0,273.0
+C25-7S,Summer,Advanced,1554.0,ADH gap too large (tolerance=5.0),1827.0,273.0
+C25-7U,Summer,Advanced,1554.0,ADH gap too large (tolerance=5.0),1827.0,273.0
+C26-7S,Summer,Advanced,1554.0,ADH gap too large (tolerance=5.0),1827.0,273.0
+C26-7U,Summer,Advanced,1554.0,ADH gap too large (tolerance=5.0),1827.0,273.0
+C22-9S,Summer,Dry,2074.0,"no (Season, Stage) match in weather log",,
+C22-9U,Summer,Dry,2074.0,"no (Season, Stage) match in weather log",,
+C23-9S,Summer,Dry,2074.0,"no (Season, Stage) match in weather log",,
+C23-9U,Summer,Dry,2074.0,"no (Season, Stage) match in weather log",,
+C24-9S,Summer,Dry,2074.0,"no (Season, Stage) match in weather log",,
+C25-9U,Summer,Dry,2074.0,"no (Season, Stage) match in weather log",,
+C26-9S,Summer,Dry,2074.0,"no (Season, Stage) match in weather log",,
+C26-9U,Summer,Dry,2074.0,"no (Season, Stage) match in weather log",,
+C22-1S,Summer,Fresh,0.0,"no (Season, Stage) match in weather log",,
+C22-1U,Summer,Fresh,0.0,"no (Season, Stage) match in weather log",,
+C26-1S,Summer,Fresh,0.0,"no (Season, Stage) match in weather log",,
+C26-1U,Summer,Fresh,0.0,"no (Season, Stage) match in weather log",,
+C23-1U,Summer,Fresh,0.0,"no (Season, Stage) match in weather log",,
+C23-1S,Summer,Fresh,0.0,"no (Season, Stage) match in weather log",,
+C24-1U,Summer,Fresh,0.0,"no (Season, Stage) match in weather log",,
+C25-1S,Summer,Fresh,0.0,"no (Season, Stage) match in weather log",,
+C25-1U,Summer,Fresh,0.0,"no (Season, Stage) match in weather log",,
+C22-3S,Summer,Fresh,592.0,"no (Season, Stage) match in weather log",,
+C22-3U,Summer,Fresh,592.0,"no (Season, Stage) match in weather log",,
+C23-3S,Summer,Fresh,592.0,"no (Season, Stage) match in weather log",,
+C23-3U,Summer,Fresh,592.0,"no (Season, Stage) match in weather log",,
+C24-3S,Summer,Fresh,592.0,"no (Season, Stage) match in weather log",,
+C24-3U,Summer,Fresh,592.0,"no (Season, Stage) match in weather log",,
+C25-3S,Summer,Fresh,592.0,"no (Season, Stage) match in weather log",,
+C25-3U,Summer,Fresh,592.0,"no (Season, Stage) match in weather log",,
+C26-3S,Summer,Fresh,592.0,"no (Season, Stage) match in weather log",,
+C26-3U,Summer,Fresh,592.0,"no (Season, Stage) match in weather log",,
