@@ -1,8 +1,9 @@
 # src/alpha_diversity_page.py
 """
 Streamlit page: alpha diversity (observed richness, Chao1, Shannon) on
-rarefied counts, viewable by any combination of metadata parameters or
-month by month. Computation comes from diversity.py; this file is UI only.
+rarefied counts, viewable by any combination of metadata parameters, month by
+month, or by actual sampling date. Computation comes from diversity.py; this
+file is UI only.
 
 Run with:  python -m streamlit run alpha_diversity_page.py
 """
@@ -47,10 +48,13 @@ LEVEL_COL = "rank"                       # Family / Phylum; set to None if absen
 META_COLS = ["Carcass", "Family", "Season", "Stage", "ADH"]  # "Family" (Under/Side) is shown as Location
 COLOR_SEQ = px.colors.qualitative.Plotly  # same colors on screen and in the download
 # Month is taken from a "Month" column if you have one, otherwise derived
-# from the first column whose name contains "date" (case-insensitive).
+# from the date column chosen in the sidebar (default: first column whose name
+# contains "date", case-insensitive). The "By sampling date" view always uses
+# that date column.
 
 METRICS = {"observed_richness": "Observed richness", "chao1": "Chao1", "shannon": "Shannon"}
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+DATE_FORMATS = ["Auto", "Day first (DD/MM/YYYY)", "Month first (MM/DD/YYYY)"]
 
 
 # ---------------------------------------------------------------------------
@@ -78,9 +82,72 @@ def load_long() -> pd.DataFrame:
     return df
 
 
-def add_month(meta: pd.DataFrame):
-    """Adds a 'Month' column (ordered chronologically). Returns (meta, ordered_labels)
-    or (meta, None) if no month information exists."""
+_DATE_RE = r"^\s*(\d{1,4})[/\-.](\d{1,2})[/\-.](\d{1,4})"
+
+
+def _infer_order(text: pd.Series):
+    """Look at numeric dates like 13/04/2025 and work out the order from unambiguous values.
+    Returns "iso" (year first), "day", "month", or None when it can't be told."""
+    parts = text.str.extract(_DATE_RE).dropna().astype(int)
+    if parts.empty:
+        return None
+    if (parts[0] > 31).any():
+        return "iso"
+    day_evidence, month_evidence = (parts[0] > 12).any(), (parts[1] > 12).any()
+    if day_evidence and not month_evidence:
+        return "day"
+    if month_evidence and not day_evidence:
+        return "month"
+    return None
+
+
+def date_is_ambiguous(s: pd.Series) -> bool:
+    """True for text dates like 05/04/2025 where every day and month number is 12 or less."""
+    if pd.api.types.is_datetime64_any_dtype(s) or pd.api.types.is_numeric_dtype(s):
+        return False
+    text = s.dropna().astype(str).str.strip()
+    return (not text.empty and text.str.match(_DATE_RE).any() and _infer_order(text) is None)
+
+
+def _to_datetime(s: pd.Series, dayfirst: bool) -> pd.Series:
+    """Parse text dates one by one (so mixed formats still parse), bad values become NaT."""
+    try:
+        return pd.to_datetime(s, errors="coerce", dayfirst=dayfirst, format="mixed")
+    except (ValueError, TypeError):   # older pandas without format="mixed"
+        return pd.to_datetime(s, errors="coerce", dayfirst=dayfirst)
+
+
+def parse_dates(s: pd.Series, fmt: str = "Auto") -> pd.Series:
+    """Robust date parser. Handles real datetimes, Excel serial numbers and text dates.
+    In Auto mode the day/month order is worked out from the data (any value with a day
+    above 12 settles it); fully ambiguous dates are read month first, and the sidebar says so."""
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return s.dt.tz_localize(None) if getattr(s.dt, "tz", None) is not None else s
+    if pd.api.types.is_numeric_dtype(s) and s.dropna().between(20000, 80000).all():
+        return pd.to_datetime(s, unit="D", origin="1899-12-30", errors="coerce")   # Excel serial dates
+    text = s.astype(str).str.strip()
+    order = _infer_order(text)
+    if order == "iso":
+        dayfirst = False                      # 2025-04-05 is unambiguous
+    elif fmt.startswith("Day"):
+        dayfirst = True
+    elif fmt.startswith("Month"):
+        dayfirst = False
+    else:
+        dayfirst = order == "day"
+    return _to_datetime(text, dayfirst)
+
+
+def add_month(meta: pd.DataFrame, date_col=None, date_fmt: str = "Auto"):
+    """Adds a 'Month' column (ordered chronologically) and a 'SampleDate' column (actual
+    day). Returns (meta, ordered_month_labels) or (meta, None) if no month information exists."""
+    if date_col is None:
+        date_col = next((c for c in meta.columns if "date" in str(c).lower()), None)
+    dt = None
+    if date_col is not None and date_col in meta.columns:
+        dt = parse_dates(meta[date_col], date_fmt)
+        meta = meta.assign(SampleDate=dt.dt.normalize())
+
     if "Month" in meta.columns:
         raw = meta["Month"]
         if pd.api.types.is_numeric_dtype(raw):
@@ -91,10 +158,8 @@ def add_month(meta: pd.DataFrame):
         meta = meta.assign(Month=num.map(lambda n: MONTH_ABBR[n - 1] if pd.notna(n) else None))
         return meta, [m for m in MONTH_ABBR if m in set(meta["Month"].dropna())]
 
-    date_col = next((c for c in meta.columns if "date" in str(c).lower()), None)
-    if date_col is None:
+    if dt is None:
         return meta, None
-    dt = pd.to_datetime(meta[date_col], errors="coerce")
     multi_year = dt.dt.year.nunique() > 1
     labels = dt.dt.strftime("%Y-%m") if multi_year else dt.dt.strftime("%b")
     meta = meta.assign(Month=labels.where(dt.notna()))
@@ -122,6 +187,7 @@ st.set_page_config(page_title="Alpha diversity", layout="wide")
 st.title("Alpha diversity")
 
 df = load_long()
+date_like = [c for c in df.columns if "date" in str(c).lower()]
 
 with st.sidebar:
     st.header("Data")
@@ -146,21 +212,36 @@ with st.sidebar:
     metric = st.radio("Alpha diversity metric", list(available), format_func=METRICS.get)
     metrics = [metric]
 
+    date_col, date_fmt = None, "Auto"
+    if date_like:
+        st.header("Dates")
+        date_col = st.selectbox("Date column", date_like,
+                                help="Used for the Month by month and By sampling date views.")
+        date_fmt = st.radio("Date format", DATE_FORMATS,
+                            help="Auto works the order out from the data (any date with a day above 12 "
+                                 "settles it). If days and months look swapped, choose Day first.")
+        if date_fmt == "Auto" and date_is_ambiguous(df[date_col]):
+            st.caption("Every day and month number in this column is 12 or less, so the order can't be "
+                       "detected: dates are being read month first. If days and months look swapped "
+                       "(e.g. 5 Apr shown as 4 May), choose Day first above.")
+
 alpha = compute_alpha(df, depth)
-date_like = [c for c in df.columns if "date" in str(c).lower()]
 meta = (df[[SAMPLE_COL] + [c for c in META_COLS + ["Month"] + date_like if c in df.columns]]
         .drop_duplicates(SAMPLE_COL).set_index(SAMPLE_COL))
 meta = meta.rename(columns={"Family": "Location"})
-meta, month_order = add_month(meta)
+meta, month_order = add_month(meta, date_col, date_fmt)
 data = alpha.join(meta, how="inner")
 
-params = [c for c in meta.columns if c != "ADH" and c not in date_like]
+params = [c for c in meta.columns if c != "ADH" and c not in date_like and c != "SampleDate"]
 if not metrics or not params:
     st.info("Pick at least one metric.")
     st.stop()
 
-view = st.radio("View", ["By parameters", "Month by month"], horizontal=True)
+view = st.radio("View", ["By parameters", "Month by month", "By sampling date"], horizontal=True)
 
+mode = None
+date_summary = None
+show_all_dates = False
 if view == "By parameters":
     c1, c2, c3 = st.columns(3)
     group_by = c1.multiselect("Group by (combine several)", params,
@@ -173,7 +254,7 @@ if view == "By parameters":
     plot_df = data.copy()
     plot_df["group"] = plot_df[group_by].astype(str).agg(" | ".join, axis=1)
     x_col, order = "group", sorted(plot_df["group"].unique())
-else:
+elif view == "Month by month":
     if month_order is None:
         st.warning("No month information found. Add a `Month` column (name or 1-12) or a "
                    "date column to the metadata in wrangle.py and re-run it.")
@@ -184,6 +265,33 @@ else:
     show_points = c3.checkbox("Show individual samples", value=False)
     plot_df = data.dropna(subset=["Month"]).copy()
     x_col, order = "Month", month_order
+else:  # By sampling date
+    if "SampleDate" not in meta.columns or meta["SampleDate"].notna().sum() == 0:
+        st.warning("No usable dates found. Pick a date column in the sidebar, or check the date "
+                   "format setting (Auto / Day first / Month first).")
+        st.stop()
+    c1, c2, c3 = st.columns(3)
+    color_by = c1.selectbox("Split by", ["(none)"] + [p for p in params if p != "Month"])
+    date_summary = c2.radio("Summary", ["Mean ± SEM per date", "Each sample"], horizontal=True)
+    plot_df = data.dropna(subset=["SampleDate"]).copy()
+    n_dates = plot_df["SampleDate"].nunique()
+    show_all_dates = c3.checkbox("Label every sampling date on the axis", value=n_dates <= 40,
+                                 help="Turn off if the axis gets crowded.")
+    show_points = False
+    x_col, order = "SampleDate", None
+
+    dates = plot_df["SampleDate"]
+    st.caption(f"Date column: {date_col} — {n_dates} distinct sampling dates, "
+               f"{dates.min():%d %b %Y} to {dates.max():%d %b %Y}.")
+    if (dates.dt.day == 1).all():
+        st.warning("Every date in this column falls on the 1st of a month, so it only records the month, "
+                   "not the day sampled. If another date column has the real sampling days, pick it in the "
+                   "sidebar. Otherwise the day was lost upstream (the source metadata or wrangle.py), "
+                   "and no plot can recover it.")
+    n_bad = int(meta["SampleDate"].isna().sum())
+    if n_bad:
+        st.caption(f"{n_bad} samples have no parseable date and are left out of this view. "
+                   "If many are missing, try the other date-format setting.")
 
 color = None if color_by == "(none)" else color_by
 long = plot_df.reset_index().melt(
@@ -191,7 +299,20 @@ long = plot_df.reset_index().melt(
     value_vars=metrics, var_name="metric", value_name="value")
 long["metric"] = long["metric"].map(METRICS)
 
-if view == "Month by month" and mode == "Mean ± SEM":
+if view == "By sampling date":
+    hover_cols = [c for c in ("Carcass", "Stage", "Location", "Season") if c in long.columns]
+    if date_summary == "Mean ± SEM per date":
+        keys = ["metric", "SampleDate"] + ([color] if color else [])
+        agg = long.groupby(keys, observed=True)["value"].agg(["mean", "sem", "count"]).reset_index()
+        fig = px.line(agg.sort_values("SampleDate"), x="SampleDate", y="mean", error_y="sem", color=color,
+                      markers=True, color_discrete_sequence=COLOR_SEQ, hover_data={"count": True})
+    else:
+        fig = px.scatter(long, x="SampleDate", y="value", color=color, color_discrete_sequence=COLOR_SEQ,
+                         hover_data=hover_cols)
+    fig.update_xaxes(type="date", title_text="Sampling date", tickformat="%d %b %Y", tickangle=-45)
+    if show_all_dates:
+        fig.update_xaxes(tickvals=[d.strftime("%Y-%m-%d") for d in sorted(long["SampleDate"].dropna().unique())])
+elif view == "Month by month" and mode == "Mean ± SEM":
     keys = ["metric", "Month"] + ([color] if color else [])
     agg = long.groupby(keys, observed=True)["value"].agg(["mean", "sem", "count"]).reset_index()
     fig = px.line(agg, x="Month", y="mean", error_y="sem", color=color, markers=True, color_discrete_sequence=COLOR_SEQ,
