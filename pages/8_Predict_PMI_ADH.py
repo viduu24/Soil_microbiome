@@ -143,6 +143,13 @@ with c3:
         pos_scope = st.selectbox("Sampling position", ["All"] + positions, key="ml_pos")
     else:
         pos_scope = "All"
+    if has_season and cls_col != SEASON_COL:
+        seasons_avail = sorted(wide[SEASON_COL].dropna().astype(str).unique().tolist())
+        season_scope = st.selectbox("Season (analyse within one season)", ["All"] + seasons_avail, key="ml_season",
+                                    help="Restricts everything to carcasses from one season, so the models can't "
+                                         "use season as a shortcut. Fewer carcasses, so scores are noisier.")
+    else:
+        season_scope = "All"
 
 d1, d2, d3, d4 = st.columns(4)
 with d1:
@@ -180,12 +187,16 @@ if is_cls:
         mask &= ~lab.astype(str).str.contains("|", regex=False)
     if pos_scope != "All":
         mask &= wide[POSITION_COL].astype(str) == pos_scope
+    if season_scope != "All":
+        mask &= wide[SEASON_COL].astype(str) == season_scope
     counts = lab[mask].astype(str).value_counts()
     mask &= lab.astype(str).isin(counts[counts >= min_class].index)
 else:
     mask = wide[target].notna() & wide[group_col].notna()
     if pos_scope != "All":
         mask &= wide[POSITION_COL].astype(str) == pos_scope
+    if season_scope != "All":
+        mask &= wide[SEASON_COL].astype(str) == season_scope
 
 sub = wide.loc[mask].reset_index(drop=True)
 rel = rel_all.loc[mask].reset_index(drop=True)
@@ -207,8 +218,13 @@ if is_cls:
         st.stop()
 
 if n_groups < 3:
-    st.error("Need at least 3 carcasses to cross-validate by carcass.")
+    st.error("Need at least 3 carcasses to cross-validate by carcass"
+             + (" -- this season has too few. Choose All seasons or another season." if season_scope != "All" else "."))
     st.stop()
+if season_scope != "All":
+    st.info(f"Within-season analysis ({season_scope}): only {n_groups} carcasses, so each fold holds out a large "
+            "share of the data and scores will be noisy. Skip the final test set here unless you have 7+ carcasses, "
+            "and compare against the baselines rather than reading absolute numbers.")
 if rel.shape[1] < 2:
     st.error("Fewer than 2 taxa left after the prevalence filter -- lower the threshold.")
     st.stop()
@@ -557,7 +573,7 @@ def _run_cls() -> dict:
 
 
 def _settings_text(what, n_dev, g_dev) -> str:
-    bits = [str(what), rank, f"position={pos_scope}", cv_choice,
+    bits = [str(what), rank, f"position={pos_scope}", f"season={season_scope}", cv_choice,
             f"{n_dev} samples, {g_dev} carcasses in cross-validation", f"{rel.shape[1]} taxa"]
     if use_log:
         bits.append("log outcome")
