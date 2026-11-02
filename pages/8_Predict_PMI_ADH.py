@@ -68,6 +68,9 @@ MEAN_NAME = "Mean only (no information)"
 MAJ_NAME = "Majority class (no information)"
 META_NAME = "Metadata only"
 ENSEMBLE_NAME = "Average of taxa models"
+EACH_SEASON = "Every season (side by side)"
+POOLED_NAME = "All seasons (pooled)"
+MIN_SEASON_CARCASSES = 4      # a season needs at least this many carcasses to be run on its own
 
 # ---------------------------------------------------------------------------
 # Data
@@ -145,9 +148,12 @@ with c3:
         pos_scope = "All"
     if has_season and cls_col != SEASON_COL:
         seasons_avail = sorted(wide[SEASON_COL].dropna().astype(str).unique().tolist())
-        season_scope = st.selectbox("Season (analyse within one season)", ["All"] + seasons_avail, key="ml_season",
-                                    help="Restricts everything to carcasses from one season, so the models can't "
-                                         "use season as a shortcut. Fewer carcasses, so scores are noisier.")
+        season_scope = st.selectbox("Season (analyse within a season)", ["All", EACH_SEASON] + seasons_avail,
+                                    key="ml_season",
+                                    help="One season: restricts everything to that season's carcasses, so the models "
+                                         "can't use season as a shortcut. 'Every season': runs the whole benchmark "
+                                         "separately in each season and compares them. Fewer carcasses per season "
+                                         "means noisier scores.")
     else:
         season_scope = "All"
 
@@ -180,28 +186,32 @@ with st.expander("Model settings"):
 # ---------------------------------------------------------------------------
 # Subset
 # ---------------------------------------------------------------------------
-if is_cls:
-    lab = wide[cls_col]
-    mask = lab.notna() & wide[group_col].notna()
-    if cls_col == STAGE_COL and drop_pipe:
-        mask &= ~lab.astype(str).str.contains("|", regex=False)
+def _build_subset(season_filter):
+    """Rows and taxa for the current task, optionally restricted to one season. Returns (sub, rel)."""
+    if is_cls:
+        lab = wide[cls_col]
+        mask = lab.notna() & wide[group_col].notna()
+        if cls_col == STAGE_COL and drop_pipe:
+            mask &= ~lab.astype(str).str.contains("|", regex=False)
+    else:
+        mask = wide[target].notna() & wide[group_col].notna()
     if pos_scope != "All":
         mask &= wide[POSITION_COL].astype(str) == pos_scope
-    if season_scope != "All":
-        mask &= wide[SEASON_COL].astype(str) == season_scope
-    counts = lab[mask].astype(str).value_counts()
-    mask &= lab.astype(str).isin(counts[counts >= min_class].index)
-else:
-    mask = wide[target].notna() & wide[group_col].notna()
-    if pos_scope != "All":
-        mask &= wide[POSITION_COL].astype(str) == pos_scope
-    if season_scope != "All":
-        mask &= wide[SEASON_COL].astype(str) == season_scope
+    if season_filter != "All":
+        mask &= wide[SEASON_COL].astype(str) == season_filter
+    if is_cls:
+        counts = lab[mask].astype(str).value_counts()
+        mask &= lab.astype(str).isin(counts[counts >= min_class].index)
+    s_ = wide.loc[mask].reset_index(drop=True)
+    r_ = rel_all.loc[mask].reset_index(drop=True)
+    r_ = r_.loc[:, (r_ > 0).mean() >= prevalence / 100.0]
+    r_ = r_.loc[:, r_.sum() > 0]
+    return s_, r_
 
-sub = wide.loc[mask].reset_index(drop=True)
-rel = rel_all.loc[mask].reset_index(drop=True)
-rel = rel.loc[:, (rel > 0).mean() >= prevalence / 100.0]
-rel = rel.loc[:, rel.sum() > 0]
+
+each_mode = season_scope == EACH_SEASON
+one_season = season_scope not in ("All", EACH_SEASON)
+sub, rel = _build_subset(season_scope if one_season else "All")
 
 n_samples = len(sub)
 n_groups = sub[group_col].nunique()
@@ -219,12 +229,17 @@ if is_cls:
 
 if n_groups < 3:
     st.error("Need at least 3 carcasses to cross-validate by carcass"
-             + (" -- this season has too few. Choose All seasons or another season." if season_scope != "All" else "."))
+             + (" -- this season has too few. Choose All seasons or another season." if one_season else "."))
     st.stop()
-if season_scope != "All":
+if one_season:
     st.info(f"Within-season analysis ({season_scope}): only {n_groups} carcasses, so each fold holds out a large "
             "share of the data and scores will be noisy. Skip the final test set here unless you have 7+ carcasses, "
             "and compare against the baselines rather than reading absolute numbers.")
+if each_mode:
+    per_season = sub.groupby(SEASON_COL)[group_col].nunique()
+    st.info("Every-season mode: the benchmark runs separately inside each season (the final test set is skipped). "
+            "Carcasses per season: " + ", ".join(f"{k}: {v}" for k, v in per_season.items())
+            + f". Seasons with fewer than {MIN_SEASON_CARCASSES} carcasses are skipped.")
 if rel.shape[1] < 2:
     st.error("Fewer than 2 taxa left after the prevalence filter -- lower the threshold.")
     st.stop()
@@ -242,7 +257,7 @@ with t2:
                              disabled=not use_test)
 with t3:
     seed = st.number_input("Random seed for the split", 0, 9999, 42, key="ml_seed", disabled=not use_test)
-if use_test and n_groups - int(n_test) < 3:
+if use_test and not each_mode and n_groups - int(n_test) < 3:
     st.error("Keep at least 3 carcasses for cross-validation: reserve fewer carcasses for the test set.")
     st.stop()
 
@@ -267,7 +282,7 @@ def _jsd_kernel(x: np.ndarray) -> np.ndarray:
     return np.exp(-(d ** 2) / (2 * sigma ** 2))
 
 
-def _meta_matrix(exclude=None):
+def _meta_matrix(sub, exclude=None):
     """Season/Position indicator columns, never including the column being predicted."""
     cols = [c for c in (SEASON_COL, POSITION_COL) if c in sub.columns and c != exclude]
     if not cols:
@@ -276,7 +291,7 @@ def _meta_matrix(exclude=None):
     return df.to_numpy(float), list(df.columns)
 
 
-def _dev_test_split(groups: np.ndarray):
+def _dev_test_split(groups: np.ndarray, use_test: bool):
     if not use_test:
         return np.arange(len(groups)), np.array([], dtype=int), []
     uniq = np.array(sorted(set(groups)))
@@ -332,16 +347,16 @@ def _proba_full(model, x, k: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Numeric outcome
 # ---------------------------------------------------------------------------
-def _run_reg() -> dict:
+def _run_reg(sub=sub, rel=rel, use_test=use_test, scope_label=None) -> dict:
     y_raw = sub[target].to_numpy(float)
     y = np.log1p(y_raw) if use_log else y_raw
     groups = sub[group_col].astype(str).to_numpy()
     n = len(sub)
-    dev_idx, test_idx, held = _dev_test_split(groups)
+    dev_idx, test_idx, held = _dev_test_split(groups, use_test)
 
     x_rel = rel.to_numpy(float)
     x_clr = _clr(x_rel)
-    x_meta, meta_names = _meta_matrix()
+    x_meta, meta_names = _meta_matrix(sub)
     x_rf = np.hstack([x_rel, x_meta]) if add_meta else x_rel
     x_lin = np.hstack([x_clr, x_meta]) if add_meta else x_clr
     kern = _jsd_kernel(x_rel)
@@ -439,25 +454,25 @@ def _run_reg() -> dict:
         "kind": "reg", "preds": preds_dev, "detail": detail, "scores": scores, "importance": importance,
         "test_scores": test_scores, "test_detail": test_detail, "held": held,
         "group_col": group_col, "target": target, "n_folds": len(splits),
-        "settings": _settings_text(target, len(dev_idx), len(set(groups[dev_idx]))),
+        "settings": _settings_text(target, len(dev_idx), len(set(groups[dev_idx])), rel, use_test, scope_label),
     }
 
 
 # ---------------------------------------------------------------------------
 # Category outcome
 # ---------------------------------------------------------------------------
-def _run_cls() -> dict:
+def _run_cls(sub=sub, rel=rel, use_test=use_test, scope_label=None) -> dict:
     labels = sub[cls_col].astype(str).to_numpy()
     classes = sorted(set(labels))
     k = len(classes)
     y = np.array([classes.index(v) for v in labels])
     groups = sub[group_col].astype(str).to_numpy()
     n = len(sub)
-    dev_idx, test_idx, held = _dev_test_split(groups)
+    dev_idx, test_idx, held = _dev_test_split(groups, use_test)
 
     x_rel = rel.to_numpy(float)
     x_clr = _clr(x_rel)
-    x_meta, meta_names = _meta_matrix(exclude=cls_col)
+    x_meta, meta_names = _meta_matrix(sub, exclude=cls_col)
     x_rf = np.hstack([x_rel, x_meta]) if add_meta else x_rel
     x_lin = np.hstack([x_clr, x_meta]) if add_meta else x_clr
     kern = _jsd_kernel(x_rel)
@@ -568,12 +583,12 @@ def _run_cls() -> dict:
         "held": held, "group_col": group_col, "target": cls_col if cls_col != POSITION_COL else "Position",
         "n_folds": len(splits),
         "settings": _settings_text(cls_col if cls_col != POSITION_COL else "Position",
-                                   len(dev_idx), len(set(groups[dev_idx]))),
+                                   len(dev_idx), len(set(groups[dev_idx])), rel, use_test, scope_label),
     }
 
 
-def _settings_text(what, n_dev, g_dev) -> str:
-    bits = [str(what), rank, f"position={pos_scope}", f"season={season_scope}", cv_choice,
+def _settings_text(what, n_dev, g_dev, rel, use_test, scope_label=None) -> str:
+    bits = [str(what), rank, f"position={pos_scope}", f"season={scope_label or season_scope}", cv_choice,
             f"{n_dev} samples, {g_dev} carcasses in cross-validation", f"{rel.shape[1]} taxa"]
     if use_log:
         bits.append("log outcome")
@@ -703,27 +718,176 @@ def _show_cls(res: dict):
 
 
 # ---------------------------------------------------------------------------
-# Run + results
+# Run + results: one analysis
 # ---------------------------------------------------------------------------
-if st.button("Run benchmark", type="primary", key="ml_run_btn"):
-    st.session_state["ml_result"] = _run_cls() if is_cls else _run_reg()
+def _show_single():
+    res = st.session_state.get("ml_result")
+    if res is None:
+        st.info("Choose settings above, then click **Run benchmark**.")
+        return
 
-res = st.session_state.get("ml_result")
-if res is None:
-    st.info("Choose settings above, then click **Run benchmark**.")
-    st.stop()
+    st.subheader("Results (cross-validated on held-out carcasses)")
+    st.caption(f"Settings: {res['settings']}  ({res['n_folds']} folds)")
 
-st.subheader("Results (cross-validated on held-out carcasses)")
-st.caption(f"Settings: {res['settings']}  ({res['n_folds']} folds)")
+    out = _show_cls(res) if res["kind"] == "cls" else _show_reg(res)
 
-out = _show_cls(res) if res["kind"] == "cls" else _show_reg(res)
+    with st.expander("Top taxa by Random Forest importance (fit on the cross-validation carcasses, "
+                     "for interpretation only)"):
+        fig3 = px.bar(res["importance"].iloc[::-1], x="importance", y="feature", orientation="h")
+        st.plotly_chart(fig3, use_container_width=True, key="ml_importance")
 
-with st.expander("Top taxa by Random Forest importance (fit on the cross-validation carcasses, for interpretation only)"):
-    fig3 = px.bar(res["importance"].iloc[::-1], x="importance", y="feature", orientation="h")
-    st.plotly_chart(fig3, use_container_width=True, key="ml_importance")
+    st.download_button("Download held-out predictions (CSV)", out.to_csv(index=False).encode("utf-8"),
+                       file_name=f"heldout_predictions_{res['target']}.csv", mime="text/csv", key="ml_csv")
 
-st.download_button("Download held-out predictions (CSV)", out.to_csv(index=False).encode("utf-8"),
-                   file_name=f"heldout_predictions_{res['target']}.csv", mime="text/csv", key="ml_csv")
+
+# ---------------------------------------------------------------------------
+# Run + results: every season side by side
+# ---------------------------------------------------------------------------
+REG_HEADLINES = ["MAE improvement vs mean-only", "R2", "MAE", "RMSE", "Pearson r", "Spearman"]
+CLS_HEADLINES = ["Balanced accuracy", "Accuracy", "Macro F1", "ROC AUC", "Accuracy gain vs majority"]
+BASELINE_NAMES = {MEAN_NAME, MAJ_NAME, META_NAME, META_NAME + " (Season + Position)"}
+
+
+def _run_every_season(include_pooled: bool):
+    seasons_all = sorted(wide[SEASON_COL].dropna().astype(str).unique().tolist())
+    steps = seasons_all + ([POOLED_NAME] if include_pooled else [])
+    results, skipped, count_rows = {}, {}, []
+    bar = st.progress(0.0, text="Running seasons...")
+    for i, name in enumerate(steps):
+        bar.progress(i / len(steps), text=f"{name} ({i + 1} of {len(steps)})")
+        pooled = name == POOLED_NAME
+        s_, r_ = _build_subset("All" if pooled else name)
+        n_car = s_[group_col].nunique() if len(s_) else 0
+        row = {"Season": name, "Carcasses": n_car, "Samples": len(s_), "Taxa": r_.shape[1]}
+        why = None
+        if not pooled and n_car < MIN_SEASON_CARCASSES:
+            why = f"only {n_car} carcasses (need {MIN_SEASON_CARCASSES})"
+        elif pooled and n_car < 3:
+            why = f"only {n_car} carcasses"
+        elif r_.shape[1] < 2:
+            why = "fewer than 2 taxa left after the prevalence filter"
+        elif is_cls and s_[cls_col].nunique() < 2:
+            why = "fewer than 2 classes with enough samples"
+        elif (not is_cls) and use_log and (s_[target] < 0).any():
+            why = "negative outcome values can't be log-transformed"
+        if why is None:
+            try:
+                results[name] = (_run_cls if is_cls else _run_reg)(sub=s_, rel=r_, use_test=False, scope_label=name)
+            except Exception as e:                       # show the reason instead of losing the whole run
+                why = f"error while running: {e}"
+        if why:
+            skipped[name] = why
+            row["Status"] = "skipped"
+        else:
+            row["Status"] = "run"
+        count_rows.append(row)
+    bar.empty()
+    st.session_state["ml_multi"] = {
+        "task": task, "kind": "cls" if is_cls else "reg", "results": results, "skipped": skipped,
+        "counts": pd.DataFrame(count_rows), "target": (cls_col if is_cls else target),
+        "settings": (f"{task} | {rank} | position={pos_scope} | {cv_choice} | prevalence >= {prevalence}% | "
+                     f"{'log outcome | ' if use_log and not is_cls else ''}"
+                     f"{'+Season/Position features | ' if add_meta else ''}no final test set"),
+    }
+
+
+def _verdict_table(multi) -> pd.DataFrame:
+    """Per season: average-of-taxa-models vs the strongest no-taxa baseline. Uses the ensemble row (not the best
+    single model) so the comparison isn't flattered by picking a winner among several models."""
+    rows = []
+    reg = multi["kind"] == "reg"
+    for name, r in multi["results"].items():
+        sc = r["scores"].set_index("Model")
+        if ENSEMBLE_NAME not in sc.index:
+            continue
+        base = sc.loc[[m for m in sc.index if m in BASELINE_NAMES]]
+        if reg:
+            b_model = base["MAE"].idxmin()
+            rows.append({"Season": name, "Taxa MAE (average of models)": sc.loc[ENSEMBLE_NAME, "MAE"],
+                         "Best baseline": b_model, "Baseline MAE": base.loc[b_model, "MAE"],
+                         "Error removed vs baseline": 1 - sc.loc[ENSEMBLE_NAME, "MAE"] / base.loc[b_model, "MAE"],
+                         "Taxa R2": sc.loc[ENSEMBLE_NAME, "R2"]})
+        else:
+            b_model = base["Balanced accuracy"].idxmax()
+            rows.append({"Season": name, "Taxa balanced accuracy (average of models)":
+                         sc.loc[ENSEMBLE_NAME, "Balanced accuracy"],
+                         "Best baseline": b_model, "Baseline balanced accuracy": base.loc[b_model, "Balanced accuracy"],
+                         "Taxa ahead by": sc.loc[ENSEMBLE_NAME, "Balanced accuracy"]
+                         - base.loc[b_model, "Balanced accuracy"],
+                         "Taxa macro F1": sc.loc[ENSEMBLE_NAME, "Macro F1"]})
+    return pd.DataFrame(rows)
+
+
+def _show_multi(multi):
+    st.subheader("Within-season results (each season cross-validated on its own held-out carcasses)")
+    st.caption(multi["settings"])
+    st.dataframe(multi["counts"], hide_index=True, use_container_width=True)
+    for name, why in multi["skipped"].items():
+        st.warning(f"{name}: skipped, {why}.")
+    results = multi["results"]
+    if not results:
+        st.error("No season could be run. Lower the prevalence filter or check the class sizes.")
+        return
+    reg = multi["kind"] == "reg"
+
+    st.markdown("#### Do the taxa beat the baselines in each season?")
+    verdict = _verdict_table(multi)
+    if len(verdict):
+        fmt = {c: 3 for c in verdict.columns if c not in ("Season", "Best baseline")}
+        st.dataframe(verdict.round(fmt), hide_index=True, use_container_width=True)
+        st.caption(
+            ("'Error removed vs baseline' is 1 - taxa MAE / baseline MAE, so positive means the taxa did better and "
+             "0 means no gain. " if reg else
+             "'Taxa ahead by' is the taxa balanced accuracy minus the best no-taxa baseline, so positive means the "
+             "taxa did better. ")
+            + "The taxa column is the average of the four taxa models, so the result isn't flattered by picking the "
+              "best of several. The baseline here is the strongest of the no-taxa models in that season. With only a "
+              "handful of carcasses per season, treat gaps of a few points as noise.")
+
+    st.markdown("#### Compare any metric across seasons")
+    metric = st.selectbox("Metric", REG_HEADLINES if reg else CLS_HEADLINES, key="ml_multi_metric")
+    long = pd.concat([r["scores"].assign(Season=name) for name, r in results.items()], ignore_index=True)
+    model_order = list(next(iter(results.values()))["scores"]["Model"])
+    pivot = (long.pivot(index="Model", columns="Season", values=metric)
+             .reindex(index=model_order, columns=list(results)))
+    st.dataframe(pivot.round(3), use_container_width=True)
+    fig = px.bar(long, x="Season", y=metric, color="Model", barmode="group",
+                 category_orders={"Season": list(results), "Model": model_order},
+                 title=f"{multi['target']}: {metric} by season (held-out carcasses)")
+    st.plotly_chart(fig, use_container_width=True, key="ml_multi_bar")
+    add_figure_download_buttons(fig, filename=f"by_season_{multi['target']}_{metric.split()[0].lower()}",
+                                key_prefix="ml_multi_dl")
+    st.download_button("Download all season scores (CSV)", long.to_csv(index=False).encode("utf-8"),
+                       file_name=f"by_season_scores_{multi['target']}.csv", mime="text/csv", key="ml_multi_csv")
+
+    st.markdown("#### Full details for one season")
+    pick = st.selectbox("Season", list(results), key="ml_multi_pick")
+    res = results[pick]
+    st.caption(f"Settings: {res['settings']}  ({res['n_folds']} folds)")
+    out = _show_cls(res) if res["kind"] == "cls" else _show_reg(res)
+    with st.expander("Top taxa by Random Forest importance (fit on this season's carcasses, "
+                     "for interpretation only)"):
+        fig3 = px.bar(res["importance"].iloc[::-1], x="importance", y="feature", orientation="h")
+        st.plotly_chart(fig3, use_container_width=True, key="ml_multi_importance")
+    st.download_button("Download held-out predictions for this season (CSV)", out.to_csv(index=False).encode("utf-8"),
+                       file_name=f"heldout_predictions_{multi['target']}_{pick.split()[0]}.csv",
+                       mime="text/csv", key="ml_multi_pred_csv")
+
+
+if each_mode:
+    include_pooled = st.checkbox("Also run all seasons pooled, for comparison", True, key="ml_pooled")
+    if st.button("Run every season", type="primary", key="ml_run_btn"):
+        _run_every_season(include_pooled)
+    multi = st.session_state.get("ml_multi")
+    if multi is None or multi["task"] != task:
+        st.info("Choose settings above, then click **Run every season**. Each season is cross-validated separately "
+                "on its own carcasses.")
+    else:
+        _show_multi(multi)
+else:
+    if st.button("Run benchmark", type="primary", key="ml_run_btn"):
+        st.session_state["ml_result"] = _run_cls() if is_cls else _run_reg()
+    _show_single()
 
 with st.expander("How to read this / cautions"):
     st.markdown(
@@ -738,5 +902,10 @@ with st.expander("How to read this / cautions"):
         "split until it looks good.\n"
         "- With ~17 carcasses the estimates are noisy: one odd carcass can move every score. Look at the "
         "per-carcass plot, not just the summary table.\n"
+        "- **Within-season runs** remove season as a shortcut: they ask whether the taxa predict ADH, Stage or "
+        "Position among carcasses that share a season. Each season has only a few carcasses, so scores are noisy and "
+        "can't be compared directly with the all-season tables; compare each season with its own baselines.\n"
+        "- **Summer** contains two decomposition tracks (stillborn and adult), which can add scatter to any "
+        "Summer result.\n"
         "- Following Maltecca et al. 2019, averaging across model types is usually safer than picking a single winner."
     )
